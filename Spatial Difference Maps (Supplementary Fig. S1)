@@ -1,0 +1,118 @@
+/**********************************************************************
+ * Harmonisation Uncertainty: Spatial Difference Maps (Supplementary Fig. S1)
+ * Volta River Basin flood-hazard study
+ *
+ * Method (consistent with Section 2.4.1 and Table 7):
+ *   For each variable -> build native-resolution annual composite,
+ *   resample to the common 1 km grid using BILINEAR interpolation,
+ *   then map the difference  D = original - resampled.
+ *   The SAME difference field, sampled at 4,923 random points,
+ *   reproduces the RMSE / MAE reported in Table 7.
+ *
+ * LST is already at 1 km, so its difference is ~0 (matches Table 7).
+ *
+ * HOW TO RUN:
+ *   1. Paste into https://code.earthengine.google.com
+ *   2. Set BASIN below to your Volta Basin boundary asset.
+ *   3. Run. Read RMSE/MAE in the Console; start the export tasks
+ *      in the "Tasks" tab to send the GeoTIFFs to Google Drive.
+ **********************************************************************/
+
+// ===================== CONFIG =====================
+var BASIN = ee.FeatureCollection('projects/ee-owusugeorge946/assets/VOLTA_RIVER_BASIN'); // <-- your boundary asset
+var REGION = BASIN.geometry();
+
+var YEAR        = 2020;                 // composite year (match your analysis)
+var HARM_SCALE  = 1000;                 // common harmonised grid (1 km)
+var N_POINTS    = 4923;                 // sample size used in Table 7
+var SEED        = 42;
+var DRIVE_FOLDER = 'VoltaUncertainty';
+var CRS         = 'EPSG:4326';
+var PROJ_1KM    = ee.Projection(CRS).atScale(HARM_SCALE);
+
+var start = ee.Date.fromYMD(YEAR, 1, 1);
+var end   = ee.Date.fromYMD(YEAR, 12, 31);
+
+// ===================== NATIVE COMPOSITES =====================
+// CHIRPS annual rainfall (mm), native ~5566 m
+var chirpsNative = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(start, end).select('precipitation').sum().clip(REGION);
+
+// MODIS NDVI annual mean (unitless), native 250 m, scale 1e-4
+var ndviNative = ee.ImageCollection('MODIS/061/MOD13Q1')
+  .filterDate(start, end).select('NDVI').mean().multiply(0.0001).clip(REGION);
+
+// MODIS ET annual sum (mm), MOD16A2GF, native 500 m, scale 0.1 (mask fill > 32760)
+var etNative = ee.ImageCollection('MODIS/061/MOD16A2GF')
+  .filterDate(start, end).select('ET')
+  .map(function (img) { return img.updateMask(img.lt(32761)); })
+  .sum().multiply(0.1).clip(REGION);
+
+// MODIS LST annual mean (deg C), MOD11A2, native 1 km, scale 0.02, K -> C
+var lstNative = ee.ImageCollection('MODIS/061/MOD11A2')
+  .filterDate(start, end).select('LST_Day_1km').mean()
+  .multiply(0.02).subtract(273.15).clip(REGION);
+
+// native scales (m) used when reading "original" values at points
+var NATIVE = { CHIRPS: 5566, NDVI: 250, ET: 500, LST: 1000 };
+
+// ===================== HARMONISE TO 1 km (BILINEAR) =====================
+function harmonise(img) {
+  return img.resample('bilinear').reproject(PROJ_1KM);
+}
+var chirps1km = harmonise(chirpsNative);
+var ndvi1km   = harmonise(ndviNative);
+var et1km     = harmonise(etNative);
+var lst1km    = harmonise(lstNative);
+
+// ===================== DIFFERENCE MAPS (original - resampled) =====================
+var dChirps = chirpsNative.subtract(chirps1km).rename('diff');
+var dNdvi   = ndviNative.subtract(ndvi1km).rename('diff');
+var dEt     = etNative.subtract(et1km).rename('diff');
+var dLst    = lstNative.subtract(lst1km).rename('diff');
+
+// ===================== STATS: reproduce Table 7 (RMSE / MAE) =====================
+var pts = ee.FeatureCollection.randomPoints({ region: REGION, points: N_POINTS, seed: SEED });
+
+function reportStats(orig, res, name, sampScale) {
+  var stack = orig.rename('o').addBands(res.rename('r'));
+  var s = stack.sampleRegions({ collection: pts, scale: sampScale, geometries: false })
+               .filter(ee.Filter.notNull(['o', 'r']))
+               .map(function (f) {
+                 var e = ee.Number(f.get('o')).subtract(f.get('r'));
+                 return f.set('e2', e.pow(2)).set('ae', e.abs());
+               });
+  var rmse = ee.Number(s.aggregate_mean('e2')).sqrt();
+  var mae  = s.aggregate_mean('ae');
+  print(name + '  ->  RMSE:', rmse, ' MAE:', mae, ' n:', s.size());
+}
+
+print('=== Harmonisation uncertainty (Table 7 check) ===');
+reportStats(chirpsNative, chirps1km, 'CHIRPS rainfall (mm)', NATIVE.CHIRPS);
+reportStats(ndviNative,   ndvi1km,   'MODIS NDVI (unitless)', NATIVE.NDVI);
+reportStats(etNative,     et1km,     'MODIS ET (mm)',         NATIVE.ET);
+reportStats(lstNative,    lst1km,    'MODIS LST (deg C)',     NATIVE.LST);
+
+// ===================== QUICK VISUAL CHECK =====================
+var divPalette = ['#2166ac', '#67a9cf', '#d1e5f0', '#f7f7f7',
+                  '#fddbc7', '#ef8a62', '#b2182b']; // blue (neg) -> red (pos)
+Map.centerObject(BASIN, 6);
+Map.addLayer(dChirps, { min: -120, max: 120, palette: divPalette }, 'Diff CHIRPS (mm)');
+Map.addLayer(dNdvi,   { min: -0.15, max: 0.15, palette: divPalette }, 'Diff NDVI');
+Map.addLayer(dEt,     { min: -150, max: 150, palette: divPalette }, 'Diff ET (mm)');
+Map.addLayer(dLst,    { min: -1, max: 1, palette: divPalette }, 'Diff LST (deg C)', false);
+Map.addLayer(BASIN.style({ color: 'black', fillColor: '00000000' }), {}, 'Basin');
+
+// ===================== EXPORT GEOTIFFS (for Supplementary Fig. S1) =====================
+function exportDiff(diff, name) {
+  Export.image.toDrive({
+    image: diff, description: 'diff_' + name, folder: DRIVE_FOLDER,
+    region: REGION, scale: HARM_SCALE, crs: CRS, maxPixels: 1e13
+  });
+}
+exportDiff(dChirps, 'CHIRPS_rainfall');
+exportDiff(dNdvi,   'MODIS_NDVI');
+exportDiff(dEt,     'MODIS_ET');
+exportDiff(dLst,    'MODIS_LST');
+
+print('Open the Tasks tab and click Run on each export to save the maps to Drive.');
