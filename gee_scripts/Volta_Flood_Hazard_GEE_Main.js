@@ -1,60 +1,116 @@
-/************************************************************
- FINAL COMPLETE GEE FIGURE SCRIPT
- Volta River Basin
- Asset: projects/ee-owusugeorge946/assets/VOLTA_RIVER_BASIN
+/****************************************************************************************
+FINAL UPDATED REPRODUCIBLE GOOGLE EARTH ENGINE SCRIPT
+Manuscript: SUSGEO-D-26-00056R2
 
- FIGURES INCLUDED:
- Figure 1 - Study area map
- Figure 3 - Rainfall
- Figure 4 - Extreme rainfall indices
- Figure 5 - NDVI and ET
- Figure 6 - LST and CWSI
- Figure 7 - Flood hazard map
+Remote Sensing-Based Uncertainty-Aware Flood Hazard Assessment
+in the Volta River Basin Using Extreme Rainfall and Multi-Source Satellite Data
 
- NOTES:
- - Clean white background
- - No basemap contamination
- - Compact 2x2 panel layout
- - ET uses MODIS/061/MOD16A2GF (works for 2020 and 2024)
+IMPORTANT CORRECTIONS FOR RESUBMISSION
+1. Figure 7 is generated from the corrected AHP/FHI model in Eq. 14.
+2. Table 6 is generated from the corrected AHP/FHI hazard classes.
+3. Raster exports use the corrected AHP/FHI model.
+4. Validation is re-run using the corrected hazard map.
+5. The old statement that "Figure 7 remains the original map" has been removed.
 
- ADDED FOR REPRODUCIBILITY:
- - Annual raster stack export
- - Flood hazard area statistics export
- - Hydro-climatic variable statistics export
- - Harmonisation uncertainty CSV export
- - Harmonisation difference-map export
- - Terrain context export
- - Corrected AHP model exported separately as FHI_AHP and FloodHazardClass_AHP
+Corrected Eq. 14:
+FHI = 0.419(Rx1day+) + 0.292(Rx5day+) + 0.113(NDVI-)
+    + 0.090(ET-) + 0.048(LST+) + 0.038(CWSI+)
 
- IMPORTANT:
- - The original floodHazard(year) function is NOT changed.
- - Therefore, Figure 7 remains exactly as your original map.
-************************************************************/
+Validation rule used in this public reproducibility script:
+Moderate and high hazard classes 2 and 3 = predicted flood-prone
+Low hazard class 1 = predicted non-flood
+
+Public validation reference:
+Global Flood Database / DFO-based flood inventory
+****************************************************************************************/
 
 
-/***********************
- 1. LOAD STUDY AREA
-************************/
+/****************************************************************************************
+1. STUDY AREA AND SETTINGS
+****************************************************************************************/
+
 var basin = ee.FeatureCollection('projects/ee-owusugeorge946/assets/VOLTA_RIVER_BASIN');
 var basinGeom = basin.geometry();
 var basinBounds = basinGeom.bounds();
 
-/***********************
- 2. SETTINGS
-************************/
+Map.centerObject(basin, 6);
+
 var indexYear = 2020;
+var mainYears = [2000, 2010, 2020, 2024];
 
-/***********************
- 3. DATASETS
-************************/
+var exportScale = 1000;
+var exportCRS = 'EPSG:4326';
+var exportFolder = 'Volta_Flood_Hazard_Corrected_AHP_GFD_FINAL';
+
+// Set this to false if you only want CSV outputs.
+var RUN_RASTER_EXPORTS = true;
+
+
+/****************************************************************************************
+2. DATASETS
+****************************************************************************************/
+
 var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
-  .filterBounds(basin);
+  .filterBounds(basinGeom);
 
-var srtm = ee.Image('USGS/SRTMGL1_003').clip(basin);
+var modisNDVI = ee.ImageCollection('MODIS/061/MOD13Q1')
+  .filterBounds(basinGeom);
 
-/***********************
- 4. VISUALIZATION SETTINGS
-************************/
+var modisET = ee.ImageCollection('MODIS/061/MOD16A2GF')
+  .filterBounds(basinGeom);
+
+var modisLST = ee.ImageCollection('MODIS/061/MOD11A2')
+  .filterBounds(basinGeom);
+
+var srtm = ee.Image('USGS/SRTMGL1_003')
+  .clip(basinGeom);
+
+var waterOccurrence = ee.Image('JRC/GSW1_4/GlobalSurfaceWater')
+  .select('occurrence')
+  .clip(basinGeom);
+
+var mainWater = waterOccurrence.gte(85)
+  .selfMask()
+  .rename('Main_River_Water');
+
+
+/****************************************************************************************
+3. GRID, BOUNDARY, AND VISUALISATION SETTINGS
+****************************************************************************************/
+
+var lonList = ee.List.sequence(-8, 4, 4);
+var latList = ee.List.sequence(6, 14, 4);
+
+var lonLines = ee.FeatureCollection(lonList.map(function(lon) {
+  lon = ee.Number(lon);
+  return ee.Feature(
+    ee.Geometry.LineString([[lon, 5], [lon, 16]]),
+    {type: 'longitude'}
+  );
+}));
+
+var latLines = ee.FeatureCollection(latList.map(function(lat) {
+  lat = ee.Number(lat);
+  return ee.Feature(
+    ee.Geometry.LineString([[-9, lat], [5, lat]]),
+    {type: 'latitude'}
+  );
+}));
+
+var gridLines = lonLines.merge(latLines);
+
+var basinOutline = ee.Image().byte().paint({
+  featureCollection: basin,
+  color: 1,
+  width: 2
+});
+
+var gridImage = ee.Image().byte().paint({
+  featureCollection: gridLines,
+  color: 1,
+  width: 1
+});
+
 var rainVis = {
   min: 400,
   max: 1800,
@@ -79,14 +135,12 @@ var cwdVis = {
   palette: ['#f7fcf0', '#ccebc5', '#7bccc4', '#2b8cbe', '#084081']
 };
 
-// Brighter NDVI palette
 var ndviVis = {
   min: 0.1,
   max: 0.7,
   palette: ['#d73027', '#fdae61', '#ffffbf', '#a6d96a', '#1a9850']
 };
 
-// Brighter ET palette
 var etVis = {
   min: 200,
   max: 900,
@@ -111,71 +165,96 @@ var elevVis = {
   palette: ['#f7fcf5', '#c7e9c0', '#74c476', '#238b45', '#00441b']
 };
 
-var floodVis = {
+var hazardVis = {
   min: 1,
   max: 3,
-  palette: ['#fff7bc', '#fec44f', '#d95f0e']
+  palette: ['#cfe3f5', '#67add8', '#08519c']
 };
 
-/***********************
- 5. HELPER FUNCTIONS
-************************/
+var fhiVis = {
+  min: 0,
+  max: 1,
+  palette: ['#eff3ff', '#bdd7e7', '#6baed6', '#2171b5', '#08306b']
+};
+
+var waterVis = {
+  palette: ['#08306b']
+};
+
+
+/****************************************************************************************
+4. HYDRO-CLIMATIC INDICATOR FUNCTIONS
+****************************************************************************************/
+
 function annualRainfall(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
-  return chirps.filterDate(start, end)
+
+  return chirps
+    .filterDate(start, end)
     .sum()
-    .clip(basin)
-    .rename('Rainfall');
+    .rename('Rainfall')
+    .clip(basinGeom);
 }
 
 function rx1day(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
-  return chirps.filterDate(start, end)
+
+  return chirps
+    .filterDate(start, end)
     .max()
-    .clip(basin)
-    .rename('Rx1day');
+    .rename('Rx1day')
+    .clip(basinGeom);
 }
 
 function rx5day(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
 
-  var daily = chirps.filterDate(start, end).sort('system:time_start');
-  var list = daily.toList(daily.size());
-  var n = daily.size();
+  var nDays = end.difference(start, 'day');
+  var offsets = ee.List.sequence(0, nDays.subtract(5));
 
-  var rolling = ee.ImageCollection(
-    ee.List.sequence(0, n.subtract(5)).map(function(i) {
-      i = ee.Number(i);
-      var imgs = ee.ImageCollection.fromImages(
-        ee.List.sequence(i, i.add(4)).map(function(j) {
-          return ee.Image(list.get(j));
-        })
-      );
-      return imgs.sum().rename('Rx5day');
+  var rolling5 = ee.ImageCollection.fromImages(
+    offsets.map(function(d) {
+      d = ee.Number(d);
+      var s = start.advance(d, 'day');
+      var e = s.advance(5, 'day');
+
+      return chirps
+        .filterDate(s, e)
+        .sum()
+        .rename('Rx5day')
+        .set('system:time_start', s.millis());
     })
   );
 
-  return rolling.max().clip(basin).rename('Rx5day');
+  return rolling5
+    .max()
+    .rename('Rx5day')
+    .clip(basinGeom);
 }
 
 function calcCDD(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
+
   var daily = chirps.filterDate(start, end).sort('system:time_start');
   var list = daily.toList(daily.size());
   var size = daily.size();
 
   var init = ee.Dictionary({
-    current: ee.Image.constant(0).clip(basin),
-    max: ee.Image.constant(0).clip(basin)
+    current: ee.Image.constant(0).clip(basinGeom),
+    max: ee.Image.constant(0).clip(basinGeom)
   });
 
   var result = ee.List.sequence(0, size.subtract(1)).iterate(function(i, state) {
     state = ee.Dictionary(state);
-    var img = ee.Image(list.get(i)).clip(basin);
+    var img = ee.Image(list.get(i)).clip(basinGeom);
     var isDry = img.lt(1);
 
     var current = ee.Image(state.get('current'));
@@ -184,27 +263,34 @@ function calcCDD(year) {
     var newCurrent = current.add(1).where(isDry.not(), 0);
     var newMax = maxRun.max(newCurrent);
 
-    return ee.Dictionary({current: newCurrent, max: newMax});
+    return ee.Dictionary({
+      current: newCurrent,
+      max: newMax
+    });
   }, init);
 
-  return ee.Image(ee.Dictionary(result).get('max')).rename('CDD');
+  return ee.Image(ee.Dictionary(result).get('max'))
+    .rename('CDD')
+    .clip(basinGeom);
 }
 
 function calcCWD(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
+
   var daily = chirps.filterDate(start, end).sort('system:time_start');
   var list = daily.toList(daily.size());
   var size = daily.size();
 
   var init = ee.Dictionary({
-    current: ee.Image.constant(0).clip(basin),
-    max: ee.Image.constant(0).clip(basin)
+    current: ee.Image.constant(0).clip(basinGeom),
+    max: ee.Image.constant(0).clip(basinGeom)
   });
 
   var result = ee.List.sequence(0, size.subtract(1)).iterate(function(i, state) {
     state = ee.Dictionary(state);
-    var img = ee.Image(list.get(i)).clip(basin);
+    var img = ee.Image(list.get(i)).clip(basinGeom);
     var isWet = img.gte(1);
 
     var current = ee.Image(state.get('current'));
@@ -213,53 +299,58 @@ function calcCWD(year) {
     var newCurrent = current.add(1).where(isWet.not(), 0);
     var newMax = maxRun.max(newCurrent);
 
-    return ee.Dictionary({current: newCurrent, max: newMax});
+    return ee.Dictionary({
+      current: newCurrent,
+      max: newMax
+    });
   }, init);
 
-  return ee.Image(ee.Dictionary(result).get('max')).rename('CWD');
+  return ee.Image(ee.Dictionary(result).get('max'))
+    .rename('CWD')
+    .clip(basinGeom);
 }
 
 function annualNDVI(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
 
-  return ee.ImageCollection('MODIS/061/MOD13Q1')
-    .filterBounds(basin)
+  return modisNDVI
     .filterDate(start, end)
     .select('NDVI')
     .mean()
     .multiply(0.0001)
-    .clip(basin)
-    .rename('NDVI');
+    .rename('NDVI')
+    .clip(basinGeom);
 }
 
 function annualET(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
 
-  return ee.ImageCollection('MODIS/061/MOD16A2GF')
-    .filterBounds(basin)
+  return modisET
     .filterDate(start, end)
     .select('ET')
     .sum()
     .multiply(0.1)
-    .clip(basin)
-    .rename('ET');
+    .rename('ET')
+    .clip(basinGeom);
 }
 
 function annualLST(year) {
+  year = ee.Number(year);
   var start = ee.Date.fromYMD(year, 1, 1);
   var end = start.advance(1, 'year');
 
-  return ee.ImageCollection('MODIS/061/MOD11A2')
-    .filterBounds(basin)
+  return modisLST
     .filterDate(start, end)
     .select('LST_Day_1km')
     .mean()
     .multiply(0.02)
     .subtract(273.15)
-    .clip(basin)
-    .rename('LST');
+    .rename('LST')
+    .clip(basinGeom);
 }
 
 function annualCWSI(year) {
@@ -268,62 +359,136 @@ function annualCWSI(year) {
   var stats = lst.reduceRegion({
     reducer: ee.Reducer.minMax(),
     geometry: basinGeom,
-    scale: 1000,
+    scale: exportScale,
     bestEffort: true,
-    maxPixels: 1e13
+    maxPixels: 1e13,
+    tileScale: 8
   });
 
   var tmin = ee.Number(stats.get('LST_min'));
   var tmax = ee.Number(stats.get('LST_max'));
+  var range = tmax.subtract(tmin);
+  var safeRange = ee.Number(ee.Algorithms.If(range.eq(0), 1, range));
 
-  return lst.subtract(tmin)
-    .divide(tmax.subtract(tmin))
+  return lst
+    .subtract(tmin)
+    .divide(safeRange)
     .clamp(0, 1)
-    .rename('CWSI');
+    .rename('CWSI')
+    .clip(basinGeom);
 }
 
-function normalize(img, scale) {
+
+/****************************************************************************************
+5. NORMALISATION FUNCTIONS
+****************************************************************************************/
+
+function normalizePositive(img, scale) {
+  img = ee.Image(img);
+  var band = ee.String(img.bandNames().get(0));
+
   var stats = img.reduceRegion({
     reducer: ee.Reducer.minMax(),
     geometry: basinGeom,
     scale: scale,
     bestEffort: true,
-    maxPixels: 1e13
+    maxPixels: 1e13,
+    tileScale: 8
   });
 
-  var band = ee.String(img.bandNames().get(0));
   var min = ee.Number(stats.get(band.cat('_min')));
   var max = ee.Number(stats.get(band.cat('_max')));
+  var range = max.subtract(min);
+  var safeRange = ee.Number(ee.Algorithms.If(range.eq(0), 1, range));
 
-  return img.subtract(min).divide(max.subtract(min)).clamp(0, 1);
+  return img
+    .subtract(min)
+    .divide(safeRange)
+    .clamp(0, 1);
 }
 
-function floodHazard(year) {
-  var rain = normalize(annualRainfall(year), 5000);
-  var rx5 = normalize(rx5day(year), 5000);
-  var et = normalize(annualET(year), 500);
-  var ndvi = normalize(annualNDVI(year), 1000);
-  var lst = normalize(annualLST(year), 1000);
-  var cwsi = normalize(annualCWSI(year), 1000);
+function normalizeInverse(img, scale) {
+  img = ee.Image(img);
+  var band = ee.String(img.bandNames().get(0));
 
-  var wetness = rain.multiply(0.30)
-    .add(rx5.multiply(0.30))
-    .add(et.multiply(0.15))
-    .add(ndvi.multiply(0.10))
-    .add(ee.Image.constant(1).subtract(lst).multiply(0.10))
-    .add(ee.Image.constant(1).subtract(cwsi).multiply(0.05))
-    .rename('FloodHazard');
+  var stats = img.reduceRegion({
+    reducer: ee.Reducer.minMax(),
+    geometry: basinGeom,
+    scale: scale,
+    bestEffort: true,
+    maxPixels: 1e13,
+    tileScale: 8
+  });
 
-  return wetness.expression(
-    "(b <= 0.33) ? 1" +
-    ": (b <= 0.66) ? 2" +
-    ": 3", {b: wetness}
-  ).rename('FloodHazardClass').clip(basin);
+  var min = ee.Number(stats.get(band.cat('_min')));
+  var max = ee.Number(stats.get(band.cat('_max')));
+  var range = max.subtract(min);
+  var safeRange = ee.Number(ee.Algorithms.If(range.eq(0), 1, range));
+
+  return ee.Image(max)
+    .subtract(img)
+    .divide(safeRange)
+    .clamp(0, 1);
 }
 
-/***********************
- 6. RENDER IMAGE
-************************/
+
+/****************************************************************************************
+6. CORRECTED AHP FLOOD HAZARD MODEL
+****************************************************************************************/
+
+var wRx1day = 0.419;
+var wRx5day = 0.292;
+var wNDVI = 0.113;
+var wET = 0.090;
+var wLST = 0.048;
+var wCWSI = 0.038;
+
+function floodHazardIndex_AHP(year) {
+  var rx1Pos = normalizePositive(rx1day(year), 5000);
+  var rx5Pos = normalizePositive(rx5day(year), 5000);
+  var ndviInv = normalizeInverse(annualNDVI(year), 1000);
+  var etInv = normalizeInverse(annualET(year), 500);
+  var lstPos = normalizePositive(annualLST(year), 1000);
+  var cwsiPos = normalizePositive(annualCWSI(year), 1000);
+
+  return rx1Pos.multiply(wRx1day)
+    .add(rx5Pos.multiply(wRx5day))
+    .add(ndviInv.multiply(wNDVI))
+    .add(etInv.multiply(wET))
+    .add(lstPos.multiply(wLST))
+    .add(cwsiPos.multiply(wCWSI))
+    .rename('FHI_AHP')
+    .clip(basinGeom);
+}
+
+function floodHazardClass_AHP(year) {
+  var fhi = floodHazardIndex_AHP(year);
+
+  return ee.Image(1)
+    .where(fhi.gte(0.33), 2)
+    .where(fhi.gte(0.66), 3)
+    .rename('FloodHazardClass_AHP')
+    .clip(basinGeom);
+}
+
+
+/****************************************************************************************
+7. MAP DISPLAY LAYERS
+****************************************************************************************/
+
+Map.addLayer(floodHazardClass_AHP(2000), hazardVis, 'Corrected AHP Flood Hazard 2000', false);
+Map.addLayer(floodHazardClass_AHP(2010), hazardVis, 'Corrected AHP Flood Hazard 2010', false);
+Map.addLayer(floodHazardClass_AHP(2020), hazardVis, 'Corrected AHP Flood Hazard 2020', false);
+Map.addLayer(floodHazardClass_AHP(2024), hazardVis, 'Corrected AHP Flood Hazard 2024', true);
+Map.addLayer(mainWater, waterVis, 'Main river / water bodies', true);
+Map.addLayer(gridImage, {palette: ['#bdbdbd']}, 'Grid lines', true);
+Map.addLayer(basinOutline, {palette: ['#000000']}, 'Volta Basin Boundary', true);
+
+
+/****************************************************************************************
+8. FIGURE RENDERING FUNCTIONS
+****************************************************************************************/
+
 function renderImage(image, vis) {
   var white = ee.Image.constant(1)
     .clip(basinBounds.buffer(300000))
@@ -332,22 +497,38 @@ function renderImage(image, vis) {
       forceRgbOutput: true
     });
 
-  var data = image.visualize(vis);
+  var data = ee.Image(image).visualize(vis);
 
-  var boundary = ee.Image().byte().paint({
-    featureCollection: basin,
-    color: 1,
-    width: 2
-  }).visualize({
-    palette: ['000000']
-  });
+  var gridLayer = gridImage
+    .clip(basinBounds.buffer(300000))
+    .visualize({
+      palette: ['bdbdbd'],
+      opacity: 0.65,
+      forceRgbOutput: true
+    });
 
-  return ee.ImageCollection([white, data, boundary]).mosaic();
+  var waterLayer = mainWater
+    .visualize({
+      palette: ['08306b'],
+      opacity: 1.0,
+      forceRgbOutput: true
+    });
+
+  var boundary = basinOutline
+    .visualize({
+      palette: ['000000'],
+      forceRgbOutput: true
+    });
+
+  return ee.ImageCollection([
+    white,
+    data,
+    gridLayer,
+    waterLayer,
+    boundary
+  ]).mosaic();
 }
 
-/***********************
- 7. THUMB PANELS
-************************/
 function makeThumbPanel(image, vis, labelText) {
   var rendered = renderImage(image, vis);
 
@@ -434,10 +615,7 @@ function makeSinglePanel(image, vis, labelText) {
   );
 }
 
-/***********************
- 8. LEGEND
-************************/
-function makeLegend(items, titleText) {
+function makeLegend(items) {
   var panel = ui.Panel({
     layout: ui.Panel.Layout.flow('horizontal'),
     style: {
@@ -447,15 +625,6 @@ function makeLegend(items, titleText) {
       padding: '2px 4px'
     }
   });
-
-  if (titleText) {
-    panel.add(ui.Label(titleText + ':', {
-      fontWeight: 'bold',
-      fontSize: '14px',
-      margin: '0 8px 0 0',
-      color: 'black'
-    }));
-  }
 
   items.forEach(function(item) {
     var colorBox = ui.Label('', {
@@ -478,9 +647,6 @@ function makeLegend(items, titleText) {
   return panel;
 }
 
-/***********************
- 9. SHOW FIGURES
-************************/
 function showFigure(mainTitle, panels, legendItems) {
   ui.root.clear();
 
@@ -515,30 +681,30 @@ function showFigure(mainTitle, panels, legendItems) {
     }
   );
 
-  var mainWidgets = [title, row1, row2];
+  var widgets = [title, row1, row2];
 
   if (legendItems && Array.isArray(legendItems)) {
     if (legendItems.length > 0 && Array.isArray(legendItems[0])) {
       legendItems.forEach(function(oneLegend) {
-        mainWidgets.push(makeLegend(oneLegend));
+        widgets.push(makeLegend(oneLegend));
       });
     } else {
-      mainWidgets.push(makeLegend(legendItems));
+      widgets.push(makeLegend(legendItems));
     }
   }
 
-  var mainPanel = ui.Panel(
-    mainWidgets,
-    ui.Panel.Layout.flow('vertical'),
-    {
-      backgroundColor: '#efefef',
-      padding: '4px',
-      margin: '0px',
-      stretch: 'both'
-    }
+  ui.root.add(
+    ui.Panel(
+      widgets,
+      ui.Panel.Layout.flow('vertical'),
+      {
+        backgroundColor: '#efefef',
+        padding: '4px',
+        margin: '0px',
+        stretch: 'both'
+      }
+    )
   );
-
-  ui.root.add(mainPanel);
 }
 
 function showSingleFigure(mainTitle, panel, legendItems) {
@@ -555,35 +721,37 @@ function showSingleFigure(mainTitle, panel, legendItems) {
     backgroundColor: '#efefef'
   });
 
-  var mainWidgets = [title, panel];
+  var widgets = [title, panel];
 
   if (legendItems && Array.isArray(legendItems)) {
     if (legendItems.length > 0 && Array.isArray(legendItems[0])) {
       legendItems.forEach(function(oneLegend) {
-        mainWidgets.push(makeLegend(oneLegend));
+        widgets.push(makeLegend(oneLegend));
       });
     } else {
-      mainWidgets.push(makeLegend(legendItems));
+      widgets.push(makeLegend(legendItems));
     }
   }
 
-  var mainPanel = ui.Panel(
-    mainWidgets,
-    ui.Panel.Layout.flow('vertical'),
-    {
-      backgroundColor: '#efefef',
-      padding: '4px',
-      margin: '0px',
-      stretch: 'both'
-    }
+  ui.root.add(
+    ui.Panel(
+      widgets,
+      ui.Panel.Layout.flow('vertical'),
+      {
+        backgroundColor: '#efefef',
+        padding: '4px',
+        margin: '0px',
+        stretch: 'both'
+      }
+    )
   );
-
-  ui.root.add(mainPanel);
 }
 
-/***********************
- 10. FIGURE 1
-************************/
+
+/****************************************************************************************
+9. FIGURE FUNCTIONS
+****************************************************************************************/
+
 function showFigure1() {
   showSingleFigure(
     'Figure 1. Location and Elevation of the Volta River Basin',
@@ -596,9 +764,6 @@ function showFigure1() {
   );
 }
 
-/***********************
- 11. FIGURE 3
-************************/
 function showFigure3() {
   showFigure(
     'Figure 3. Spatial Distribution of Annual Rainfall in the Volta River Basin',
@@ -616,9 +781,6 @@ function showFigure3() {
   );
 }
 
-/***********************
- 12. FIGURE 4
-************************/
 function showFigure4() {
   showFigure(
     'Figure 4. Spatial Patterns of Extreme Rainfall Indices in the Volta River Basin',
@@ -648,9 +810,6 @@ function showFigure4() {
   );
 }
 
-/***********************
- 13. FIGURE 5
-************************/
 function showFigure5() {
   showFigure(
     'Figure 5. Spatial Distribution of NDVI and Evapotranspiration in the Volta River Basin',
@@ -677,9 +836,6 @@ function showFigure5() {
   );
 }
 
-/***********************
- 14. FIGURE 6
-************************/
 function showFigure6() {
   showFigure(
     'Figure 6. Spatial Distribution of Land Surface Temperature and Crop Water Stress Index in the Volta River Basin',
@@ -704,186 +860,112 @@ function showFigure6() {
   );
 }
 
-/***********************
- 15. FIGURE 7
-************************/
 function showFigure7() {
-  var floodVisUpdated = {
-    min: 1,
-    max: 3,
-    palette: ['#c6dbef', '#6baed6', '#08519c']
-  };
-
   showFigure(
-    'Figure 7. Flood Hazard Classification in the Volta River Basin',
+    'Figure 7. Corrected AHP-Based Flood Hazard Classification in the Volta River Basin',
     [
-      makeThumbPanel(floodHazard(2000), floodVisUpdated, 'Flood Hazard 2000'),
-      makeThumbPanel(floodHazard(2010), floodVisUpdated, 'Flood Hazard 2010'),
-      makeThumbPanel(floodHazard(2020), floodVisUpdated, 'Flood Hazard 2020'),
-      makeThumbPanel(floodHazard(2024), floodVisUpdated, 'Flood Hazard 2024')
+      makeThumbPanel(floodHazardClass_AHP(2000), hazardVis, 'Flood Hazard 2000'),
+      makeThumbPanel(floodHazardClass_AHP(2010), hazardVis, 'Flood Hazard 2010'),
+      makeThumbPanel(floodHazardClass_AHP(2020), hazardVis, 'Flood Hazard 2020'),
+      makeThumbPanel(floodHazardClass_AHP(2024), hazardVis, 'Flood Hazard 2024')
     ],
     [
-      {label: 'Low hazard', color: '#c6dbef'},
-      {label: 'Moderate hazard', color: '#6baed6'},
+      {label: 'Low hazard', color: '#cfe3f5'},
+      {label: 'Moderate hazard', color: '#67add8'},
       {label: 'High hazard', color: '#08519c'}
     ]
   );
 }
 
 
-/************************************************************
- 16. ADDITIONAL REPRODUCIBILITY BLOCK
- IMPORTANT:
- - This block DOES NOT change your original floodHazard(year).
- - Therefore, Figure 7 remains exactly the same.
- - The corrected AHP model is exported separately as FHI_AHP and FloodHazardClass_AHP.
-************************************************************/
+/****************************************************************************************
+10. CORRECTED TABLE 6 AREA STATISTICS
+****************************************************************************************/
 
-/***********************
- A. REPRODUCIBILITY SETTINGS
-************************/
-var mainYears = [2000, 2010, 2020, 2024];
-var exportScale = 1000;
-var exportCRS = 'EPSG:4326';
-
-/***********************
- B. CORRECTED AHP WEIGHTS
-************************/
-var wRx1day = 0.419;
-var wRx5day = 0.292;
-var wNDVI   = 0.113;
-var wET     = 0.090;
-var wLST    = 0.048;
-var wCWSI   = 0.038;
-
-/***********************
- C. POSITIVE AND INVERSE NORMALISATION
-************************/
-function normalizePositive_AHP(img, scale) {
-  var stats = img.reduceRegion({
-    reducer: ee.Reducer.minMax(),
-    geometry: basinGeom,
-    scale: scale,
-    bestEffort: true,
-    maxPixels: 1e13,
-    tileScale: 8
-  });
-
-  var band = ee.String(img.bandNames().get(0));
-  var min = ee.Number(stats.get(band.cat('_min')));
-  var max = ee.Number(stats.get(band.cat('_max')));
-
-  return img.subtract(min)
-    .divide(max.subtract(min))
-    .clamp(0, 1);
+function className(code) {
+  return ee.Algorithms.If(
+    ee.Number(code).eq(1),
+    'Low Hazard',
+    ee.Algorithms.If(
+      ee.Number(code).eq(2),
+      'Moderate Hazard',
+      'High Hazard'
+    )
+  );
 }
 
-function normalizeInverse_AHP(img, scale) {
-  var stats = img.reduceRegion({
-    reducer: ee.Reducer.minMax(),
-    geometry: basinGeom,
-    scale: scale,
-    bestEffort: true,
-    maxPixels: 1e13,
-    tileScale: 8
-  });
+function hazardAreaStats_AHP(classImage, year) {
+  classImage = ee.Image(classImage);
 
-  var band = ee.String(img.bandNames().get(0));
-  var min = ee.Number(stats.get(band.cat('_min')));
-  var max = ee.Number(stats.get(band.cat('_max')));
+  var areaImage = ee.Image.pixelArea()
+    .divide(1e6)
+    .rename('Area_km2');
 
-  return ee.Image(max)
-    .subtract(img)
-    .divide(max.subtract(min))
-    .clamp(0, 1);
-}
+  var totalArea = ee.Number(
+    areaImage.reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: basinGeom,
+      scale: exportScale,
+      maxPixels: 1e13,
+      tileScale: 8
+    }).get('Area_km2')
+  );
 
-/***********************
- D. CORRECTED AHP FLOOD HAZARD INDEX
-************************/
-function floodHazardIndex_AHP(year) {
-  var rx1 = normalizePositive_AHP(rx1day(year), 5000);
-  var rx5 = normalizePositive_AHP(rx5day(year), 5000);
-  var ndviInv = normalizeInverse_AHP(annualNDVI(year), 1000);
-  var etInv = normalizeInverse_AHP(annualET(year), 500);
-  var lstPos = normalizePositive_AHP(annualLST(year), 1000);
-  var cwsiPos = normalizePositive_AHP(annualCWSI(year), 1000);
+  var classCodes = ee.List([1, 2, 3]);
 
-  return rx1.multiply(wRx1day)
-    .add(rx5.multiply(wRx5day))
-    .add(ndviInv.multiply(wNDVI))
-    .add(etInv.multiply(wET))
-    .add(lstPos.multiply(wLST))
-    .add(cwsiPos.multiply(wCWSI))
-    .rename('FHI_AHP')
-    .clip(basin);
-}
+  var features = classCodes.map(function(code) {
+    code = ee.Number(code);
 
-/***********************
- E. CORRECTED AHP FLOOD HAZARD CLASS
-************************/
-function floodHazard_AHP(year) {
-  var fhi = floodHazardIndex_AHP(year);
+    var areaValue = areaImage
+      .updateMask(classImage.eq(code))
+      .reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: basinGeom,
+        scale: exportScale,
+        maxPixels: 1e13,
+        tileScale: 8
+      })
+      .get('Area_km2');
 
-  return ee.Image(1)
-    .where(fhi.gte(0.33), 2)
-    .where(fhi.gte(0.66), 3)
-    .rename('FloodHazardClass_AHP')
-    .clip(basin);
-}
-
-/***********************
- F. AREA STATISTICS FUNCTION
- This uses your ORIGINAL floodHazard(year), so it matches your displayed Figure 7.
-************************/
-function hazardAreaStats_original(classImage, year) {
-  var areaImage = ee.Image.pixelArea().divide(1e6).rename('Area_km2');
-
-  var totalArea = areaImage.reduceRegion({
-    reducer: ee.Reducer.sum(),
-    geometry: basinGeom,
-    scale: exportScale,
-    maxPixels: 1e13,
-    tileScale: 8
-  }).get('Area_km2');
-
-  var grouped = areaImage.addBands(classImage).reduceRegion({
-    reducer: ee.Reducer.sum().group({
-      groupField: 1,
-      groupName: 'Hazard_Class_Code'
-    }),
-    geometry: basinGeom,
-    scale: exportScale,
-    maxPixels: 1e13,
-    tileScale: 8
-  });
-
-  var groups = ee.List(grouped.get('groups'));
-
-  return ee.FeatureCollection(groups.map(function(item) {
-    item = ee.Dictionary(item);
-
-    var code = ee.Number(item.get('Hazard_Class_Code'));
-    var area = ee.Number(item.get('sum'));
-    var percentage = area.divide(ee.Number(totalArea)).multiply(100);
-
-    var name = ee.Algorithms.If(code.eq(1), 'Low Hazard',
-      ee.Algorithms.If(code.eq(2), 'Moderate Hazard', 'High Hazard'));
+    var area = ee.Number(ee.Algorithms.If(areaValue, areaValue, 0));
+    var percent = area.divide(totalArea).multiply(100);
 
     return ee.Feature(null, {
       Year: year,
       Hazard_Class_Code: code,
-      Hazard_Class: name,
+      Hazard_Class: className(code),
       Area_km2: area,
-      Percentage: percentage
+      Percentage: percent
     });
-  }));
+  });
+
+  return ee.FeatureCollection(features);
 }
 
-/***********************
- G. VARIABLE STATISTICS FUNCTION
-************************/
-function imageStats_extra(image, year, variableName) {
+var table6Stats = ee.FeatureCollection([]);
+
+mainYears.forEach(function(year) {
+  table6Stats = table6Stats.merge(
+    hazardAreaStats_AHP(floodHazardClass_AHP(year), year)
+  );
+});
+
+print('TABLE 6 CORRECTED AHP AREA STATISTICS', table6Stats);
+
+Export.table.toDrive({
+  collection: table6Stats,
+  description: 'Table_6_Corrected_AHP_Flood_Hazard_Area_Statistics',
+  folder: exportFolder,
+  fileNamePrefix: 'Table_6_Corrected_AHP_Flood_Hazard_Area_Statistics',
+  fileFormat: 'CSV'
+});
+
+
+/****************************************************************************************
+11. HYDRO-CLIMATIC VARIABLE STATISTICS
+****************************************************************************************/
+
+function imageStats(image, year, variableName) {
   var band = ee.String(image.bandNames().get(0));
 
   var stats = image.reduceRegion({
@@ -908,93 +990,92 @@ function imageStats_extra(image, year, variableName) {
   });
 }
 
-/***********************
- H. EXPORT PRODUCTS WITHOUT CHANGING FIGURES
-************************/
-var allAreaStats_original = ee.FeatureCollection([]);
-var allVariableStats_extra = ee.FeatureCollection([]);
+var allVariableStats = ee.FeatureCollection([]);
 
 mainYears.forEach(function(year) {
-  var rain = annualRainfall(year);
-  var r1 = rx1day(year);
-  var r5 = rx5day(year);
-  var cdd = calcCDD(year);
-  var cwd = calcCWD(year);
-  var ndvi = annualNDVI(year);
-  var et = annualET(year);
-  var lst = annualLST(year);
-  var cwsi = annualCWSI(year);
-
-  // Original flood hazard used in your current Figure 7.
-  var hazard_original = floodHazard(year);
-
-  // Corrected AHP outputs added separately.
-  var fhi_ahp = floodHazardIndex_AHP(year);
-  var hazard_ahp = floodHazard_AHP(year);
-
-  var stack = rain
-    .addBands(r1)
-    .addBands(r5)
-    .addBands(cdd)
-    .addBands(cwd)
-    .addBands(ndvi)
-    .addBands(et)
-    .addBands(lst)
-    .addBands(cwsi)
-    .addBands(hazard_original)
-    .addBands(fhi_ahp)
-    .addBands(hazard_ahp);
-
-  Export.image.toDrive({
-    image: stack,
-    description: 'Volta_Flood_Hazard_Stack_' + year,
-    folder: 'Volta_Flood_Hazard_GEE',
-    fileNamePrefix: 'Volta_Flood_Hazard_Stack_' + year,
-    region: basinGeom,
-    scale: exportScale,
-    crs: exportCRS,
-    maxPixels: 1e13
-  });
-
-  allAreaStats_original = allAreaStats_original.merge(
-    hazardAreaStats_original(hazard_original, year)
-  );
-
   var statFC = ee.FeatureCollection([
-    imageStats_extra(rain, year, 'Rainfall'),
-    imageStats_extra(r1, year, 'Rx1day'),
-    imageStats_extra(r5, year, 'Rx5day'),
-    imageStats_extra(cdd, year, 'CDD'),
-    imageStats_extra(cwd, year, 'CWD'),
-    imageStats_extra(ndvi, year, 'NDVI'),
-    imageStats_extra(et, year, 'ET'),
-    imageStats_extra(lst, year, 'LST'),
-    imageStats_extra(cwsi, year, 'CWSI'),
-    imageStats_extra(fhi_ahp, year, 'FHI_AHP')
+    imageStats(annualRainfall(year), year, 'Rainfall'),
+    imageStats(rx1day(year), year, 'Rx1day'),
+    imageStats(rx5day(year), year, 'Rx5day'),
+    imageStats(calcCDD(year), year, 'CDD'),
+    imageStats(calcCWD(year), year, 'CWD'),
+    imageStats(annualNDVI(year), year, 'NDVI'),
+    imageStats(annualET(year), year, 'ET'),
+    imageStats(annualLST(year), year, 'LST'),
+    imageStats(annualCWSI(year), year, 'CWSI'),
+    imageStats(floodHazardIndex_AHP(year), year, 'FHI_AHP')
   ]);
 
-  allVariableStats_extra = allVariableStats_extra.merge(statFC);
+  allVariableStats = allVariableStats.merge(statFC);
 });
 
 Export.table.toDrive({
-  collection: allAreaStats_original,
-  description: 'Volta_Flood_Hazard_Area_Statistics_Original_Map',
-  folder: 'Volta_Flood_Hazard_GEE',
-  fileNamePrefix: 'Volta_Flood_Hazard_Area_Statistics_Original_Map',
-  fileFormat: 'CSV'
-});
-
-Export.table.toDrive({
-  collection: allVariableStats_extra,
+  collection: allVariableStats,
   description: 'Volta_Hydroclimatic_Variable_Statistics',
-  folder: 'Volta_Flood_Hazard_GEE',
+  folder: exportFolder,
   fileNamePrefix: 'Volta_Hydroclimatic_Variable_Statistics',
   fileFormat: 'CSV'
 });
 
-/***********************
- I. HARMONISATION UNCERTAINTY EXPORT FOR 2020
-************************/
+
+/****************************************************************************************
+12. EXPORT CORRECTED RASTERS
+****************************************************************************************/
+
+if (RUN_RASTER_EXPORTS) {
+  mainYears.forEach(function(year) {
+    var stack = annualRainfall(year)
+      .addBands(rx1day(year))
+      .addBands(rx5day(year))
+      .addBands(calcCDD(year))
+      .addBands(calcCWD(year))
+      .addBands(annualNDVI(year))
+      .addBands(annualET(year))
+      .addBands(annualLST(year))
+      .addBands(annualCWSI(year))
+      .addBands(floodHazardIndex_AHP(year))
+      .addBands(floodHazardClass_AHP(year));
+
+    Export.image.toDrive({
+      image: stack,
+      description: 'Corrected_AHP_Hydroclimatic_Stack_' + year,
+      folder: exportFolder,
+      fileNamePrefix: 'Corrected_AHP_Hydroclimatic_Stack_' + year,
+      region: basinGeom,
+      scale: exportScale,
+      crs: exportCRS,
+      maxPixels: 1e13
+    });
+
+    Export.image.toDrive({
+      image: floodHazardIndex_AHP(year),
+      description: 'Corrected_FHI_AHP_' + year,
+      folder: exportFolder,
+      fileNamePrefix: 'Corrected_FHI_AHP_' + year,
+      region: basinGeom,
+      scale: exportScale,
+      crs: exportCRS,
+      maxPixels: 1e13
+    });
+
+    Export.image.toDrive({
+      image: floodHazardClass_AHP(year),
+      description: 'Corrected_FloodHazardClass_AHP_' + year,
+      folder: exportFolder,
+      fileNamePrefix: 'Corrected_FloodHazardClass_AHP_' + year,
+      region: basinGeom,
+      scale: exportScale,
+      crs: exportCRS,
+      maxPixels: 1e13
+    });
+  });
+}
+
+
+/****************************************************************************************
+13. HARMONISATION UNCERTAINTY EXPORT FOR 2020
+****************************************************************************************/
+
 var uYear = 2020;
 var uStart = ee.Date.fromYMD(uYear, 1, 1);
 var uEnd = uStart.advance(1, 'year');
@@ -1010,7 +1091,7 @@ var chirpsOriginal = chirps
   .filterDate(uStart, uEnd)
   .select('precipitation')
   .sum()
-  .clip(basin)
+  .clip(basinGeom)
   .rename('CHIRPS_original');
 
 var chirps1km = chirpsOriginal
@@ -1059,6 +1140,7 @@ var lstOriginal = annualLST(uYear)
   .rename('LST_original');
 
 var lst1km = lstOriginal
+  .resample('bilinear')
   .reproject({
     crs: exportCRS,
     scale: exportScale
@@ -1086,7 +1168,7 @@ var uncertaintySamples = uncertaintyStack.sampleRegions({
 Export.table.toDrive({
   collection: uncertaintySamples,
   description: 'Volta_Harmonisation_Uncertainty_2020',
-  folder: 'Volta_Flood_Hazard_GEE',
+  folder: exportFolder,
   fileNamePrefix: 'Volta_Harmonisation_Uncertainty_2020',
   fileFormat: 'CSV'
 });
@@ -1099,7 +1181,7 @@ var differenceStack = chirpsDiff
 Export.image.toDrive({
   image: differenceStack,
   description: 'Volta_Harmonisation_Difference_Maps_2020',
-  folder: 'Volta_Flood_Hazard_GEE',
+  folder: exportFolder,
   fileNamePrefix: 'Volta_Harmonisation_Difference_Maps_2020',
   region: basinGeom,
   scale: exportScale,
@@ -1107,11 +1189,13 @@ Export.image.toDrive({
   maxPixels: 1e13
 });
 
-/***********************
- J. TERRAIN CONTEXT EXPORT
-************************/
+
+/****************************************************************************************
+14. TERRAIN CONTEXT EXPORT
+****************************************************************************************/
+
 var slope = ee.Terrain.slope(srtm)
-  .clip(basin)
+  .clip(basinGeom)
   .rename('Slope');
 
 var terrainStack = srtm
@@ -1121,7 +1205,7 @@ var terrainStack = srtm
 Export.image.toDrive({
   image: terrainStack,
   description: 'Volta_Terrain_Context',
-  folder: 'Volta_Flood_Hazard_GEE',
+  folder: exportFolder,
   fileNamePrefix: 'Volta_Terrain_Context',
   region: basinGeom,
   scale: exportScale,
@@ -1129,31 +1213,231 @@ Export.image.toDrive({
   maxPixels: 1e13
 });
 
-/***********************
- K. PRINT CHECKS
-************************/
-print('Your original floodHazard(year) function was NOT changed.');
-print('Therefore, Figure 7 remains the same as your original map.');
-print('Corrected AHP model exported separately as FHI_AHP and FloodHazardClass_AHP.');
+/****************************************************************************************
+15. PUBLIC VALIDATION USING GLOBAL FLOOD DATABASE
+****************************************************************************************/
 
-print('Corrected AHP weights used only in FHI_AHP:');
-print('Rx1day = 0.419');
-print('Rx5day = 0.292');
-print('NDVI inverse = 0.113');
-print('ET inverse = 0.090');
-print('LST positive = 0.048');
-print('CWSI positive = 0.038');
+var validationYear = 2024;
+var validationHazardMap = floodHazardClass_AHP(validationYear);
 
-print('Original map area statistics:', allAreaStats_original);
-print('Hydro-climatic variable statistics:', allVariableStats_extra);
-print('Harmonisation uncertainty sample preview:', uncertaintySamples.limit(5));
+var validationScale = 1000;
+var nFloodPoints = 210;
+var nNonFloodPoints = 210;
 
-print('Additional reproducibility exports added successfully without changing Figure 7.');
+var gfd = ee.ImageCollection('GLOBAL_FLOOD_DB/MODIS_EVENTS/V1')
+  .filterBounds(basinGeom);
+
+print('Global Flood Database event count in basin:', gfd.size());
+
+var observedFlood = gfd
+  .select('flooded')
+  .max()
+  .unmask(0)
+  .gt(0)
+  .rename('Observed_Flood')
+  .clip(basinGeom);
+
+Map.addLayer(
+  observedFlood.selfMask(),
+  {palette: ['#ff0000']},
+  'Observed flood reference from GFD',
+  false
+);
+
+var permanentWater = waterOccurrence
+  .unmask(0)
+  .gte(90)
+  .rename('PermanentWater')
+  .clip(basinGeom);
+
+var referenceClass = observedFlood
+  .where(
+    permanentWater.eq(1).and(observedFlood.eq(0)),
+    99
+  )
+  .rename('Observed_Flood')
+  .clip(basinGeom);
+
+referenceClass = referenceClass.updateMask(referenceClass.neq(99));
+
+var validationPoints = referenceClass.stratifiedSample({
+  numPoints: 0,
+  classBand: 'Observed_Flood',
+  classValues: [0, 1],
+  classPoints: [nNonFloodPoints, nFloodPoints],
+  region: basinGeom,
+  scale: validationScale,
+  seed: 2026,
+  geometries: true,
+  tileScale: 4
+});
+
+print('Generated validation points', validationPoints);
+print('Validation point count', validationPoints.size());
+
+Map.addLayer(
+  validationPoints.filter(ee.Filter.eq('Observed_Flood', 1)),
+  {color: 'red'},
+  'Flood validation points',
+  false
+);
+
+Map.addLayer(
+  validationPoints.filter(ee.Filter.eq('Observed_Flood', 0)),
+  {color: 'green'},
+  'Non-flood validation points',
+  false
+);
+
+var predictedFlood = validationHazardMap
+  .gte(2)
+  .rename('Predicted_Flood')
+  .clip(basinGeom);
+
+Map.addLayer(
+  predictedFlood,
+  {
+    min: 0,
+    max: 1,
+    palette: ['#f7f7f7', '#08519c']
+  },
+  'Predicted flood-prone zones from corrected AHP',
+  false
+);
+
+var sampledValidation = predictedFlood.sampleRegions({
+  collection: validationPoints,
+  properties: ['Observed_Flood'],
+  scale: validationScale,
+  geometries: true,
+  tileScale: 4
+}).map(function(feature) {
+  var observed = ee.Number(feature.get('Observed_Flood'));
+  var predicted = ee.Number(feature.get('Predicted_Flood'));
+
+  var outcome = ee.Algorithms.If(
+    observed.eq(1).and(predicted.eq(1)),
+    'TP',
+    ee.Algorithms.If(
+      observed.eq(0).and(predicted.eq(0)),
+      'TN',
+      ee.Algorithms.If(
+        observed.eq(0).and(predicted.eq(1)),
+        'FP',
+        'FN'
+      )
+    )
+  );
+
+  return feature.set({
+    Outcome: outcome,
+    Validation_Year: validationYear,
+    Validation_Source: 'Global Flood Database / DFO-based flood inventory',
+    Prediction_Rule: 'Moderate and high hazard classes 2 and 3 = predicted flood; low hazard class 1 = predicted non-flood'
+  });
+});
+
+function safeDivide(numerator, denominator) {
+  numerator = ee.Number(numerator);
+  denominator = ee.Number(denominator);
+
+  return ee.Number(
+    ee.Algorithms.If(
+      denominator.eq(0),
+      0,
+      numerator.divide(denominator)
+    )
+  );
+}
+
+var TP = sampledValidation.filter(ee.Filter.eq('Outcome', 'TP')).size();
+var TN = sampledValidation.filter(ee.Filter.eq('Outcome', 'TN')).size();
+var FP = sampledValidation.filter(ee.Filter.eq('Outcome', 'FP')).size();
+var FN = sampledValidation.filter(ee.Filter.eq('Outcome', 'FN')).size();
+
+var total = TP.add(TN).add(FP).add(FN);
+
+var accuracy = safeDivide(TP.add(TN), total);
+var precision = safeDivide(TP, TP.add(FP));
+var recall = safeDivide(TP, TP.add(FN));
+var f1 = safeDivide(
+  precision.multiply(recall).multiply(2),
+  precision.add(recall)
+);
+
+var validationMetrics = ee.FeatureCollection([
+  ee.Feature(null, {
+    Validation_Year: validationYear,
+    Reference_Data: 'Global Flood Database / DFO-based flood inventory',
+    Prediction_Map: 'Corrected_AHP_Flood_Hazard_Class_' + validationYear,
+    Prediction_Rule: 'Moderate and high hazard classes 2 and 3 = predicted flood; low hazard class 1 = predicted non-flood',
+    TP: TP,
+    TN: TN,
+    FP: FP,
+    FN: FN,
+    Total: total,
+    Accuracy: accuracy,
+    Accuracy_percent: accuracy.multiply(100),
+    Precision: precision,
+    Precision_percent: precision.multiply(100),
+    Recall: recall,
+    Recall_percent: recall.multiply(100),
+    F1_Score: f1
+  })
+]);
+
+print('VALIDATION METRICS FROM PUBLIC GFD DATA', validationMetrics);
+
+// Export metrics only as the required reproducibility file.
+Export.table.toDrive({
+  collection: validationMetrics,
+  description: 'Corrected_AHP_Validation_Metrics_GFD',
+  folder: exportFolder,
+  fileNamePrefix: 'Corrected_AHP_Validation_Metrics_GFD',
+  fileFormat: 'CSV'
+});
+
+// Optional light validation points export without geometry.
+var sampledValidationLight = sampledValidation.map(function(feature) {
+  var coords = feature.geometry().coordinates();
+
+  return ee.Feature(null, {
+    Longitude: coords.get(0),
+    Latitude: coords.get(1),
+    Observed_Flood: feature.get('Observed_Flood'),
+    Predicted_Flood: feature.get('Predicted_Flood'),
+    Outcome: feature.get('Outcome'),
+    Validation_Year: feature.get('Validation_Year')
+  });
+});
+
+Export.table.toDrive({
+  collection: sampledValidationLight,
+  description: 'Corrected_AHP_Validation_Points_GFD_Light',
+  folder: exportFolder,
+  fileNamePrefix: 'Corrected_AHP_Validation_Points_GFD_Light',
+  fileFormat: 'CSV'
+});
 
 
-/***********************
- 17. CHOOSE ONE FIGURE
-************************/
+/****************************************************************************************
+16. FINAL REPRODUCIBILITY CHECKS
+****************************************************************************************/
+
+print('SCRIPT READY');
+print('Figure 7 uses floodHazardClass_AHP(year), which implements corrected Eq. 14.');
+print('Table 6 uses hazardAreaStats_AHP(floodHazardClass_AHP(year), year).');
+print('Corrected FHI and hazard-class rasters are exported.');
+print('Validation uses the corrected hazard map and public Global Flood Database data.');
+print('Validation rule: moderate and high hazard classes = predicted flood-prone.');
+print('Low hazard class = predicted non-flood.');
+print('Run the required CSV tasks:');
+print('1. Table_6_Corrected_AHP_Flood_Hazard_Area_Statistics');
+print('2. Corrected_AHP_Validation_Metrics_GFD');
+print('Optional: Corrected_AHP_Validation_Points_GFD_Light');
+print('Run raster exports only if GeoTIFF outputs are needed.');
+
+// Choose figure to display.
 // showFigure1();
 // showFigure3();
 // showFigure4();
